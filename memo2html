@@ -1,0 +1,98 @@
+#!/usr/bin/python3
+
+#This program was forked from and inspired by a post in https://android.stackexchange.com/questions/190968/opening-memo-files-from-samsung-default-memo-app by @Alderven
+
+import os
+import re
+import sys
+import glob
+import pprint
+import zipfile
+import xmltodict
+from datetime import datetime
+from html import unescape
+
+#Surrogate pair is: Low = DC00–DFFF = 56320-57343 then High = D800-DBFF = 55296-56319, prepare regex to find it
+SURROGATE_PAIR  = r'(?:&#5529[6-9];|&#55[3-9][0-9][0-9];|&#56[0-2][0-9][0-9];|&#563[0-1][0-9];)(?:&#563[2-9][0-9];|&#56[4-9][0-9][0-9];|&#57[0-2][0-9][0-9];|&#573[0-3][0-9];|&#5734[0-3];)'
+
+#Get folder names to work from and to
+if (len(sys.argv) != 3):
+    sys.exit("Usage: ", sys.argv[0]," from-floder/ to-folder/")
+MEMO_PATH = sys.argv[1]
+RESULTS_PATH = sys.argv[2]
+
+if (not(os.path.exists(MEMO_PATH))):
+    sys.exit("Path to memo files is incorrect")
+
+if (not(os.path.exists(RESULTS_PATH))):
+    sys.exit("Path to write html to does not exist")
+
+memos = glob.glob(MEMO_PATH + '/*.memo') #List all memos in this folder
+for i, memo in enumerate(memos):
+    print('{}/{} - {}'.format(i+1, len(memos), memo)) #Display memo zip file's filename
+
+    try:
+        #Open *.memo file, extract media and text
+        archive = zipfile.ZipFile(memo, 'r') #Open zip archive with memos
+
+        #Extract media files
+        mediafiles = archive.namelist() #List complete archive content
+        mediafiles = [x for x in mediafiles if x != "media/" and x != "memo_content.xml"] #Select media files only
+        archive.extractall(path=RESULTS_PATH,members=mediafiles) #Extract media files to results folder
+
+        #Get memo text content. It's in HTML, but may contain escaped surrogate pairs per UTF-16 quirk
+        memo_content = archive.read('memo_content.xml').decode('utf-8') #Read memo content
+
+        #Convert escaped ampersands, as they are hiding surrogate pairs
+        memo_content = re.sub('&amp;','&',memo_content)
+
+        #Convert all escaped surrogate pairs to legit UTF-8
+        pairs = re.findall(SURROGATE_PAIR, memo_content) #Find all surrogate pairs and make a list
+        splits = re.split(SURROGATE_PAIR,memo_content) #Find all surrogate pair positions and split memo on them        
+        emojis = []
+        memo_content = ''
+        last = 0
+
+        #Now we need to convert all surrogate pairs into proper Unichod characters
+        if len(pairs) > 0:
+            for p, pair in enumerate(pairs):
+                hs  = int(pairs[p][2:7])   #Convert numerical parts of surrogate pair to two numbers
+                ls = int(pairs[p][10:15])
+                u = (0x10000 + ((hs - 0xD800) * 0x400) + (ls - 0xDC00))
+                emojis.append((('\\U000' + hex(u)[2:]).encode().decode('unicode-escape')))
+                memo_content = memo_content + splits[p] + emojis[p]
+                last = p+1
+        memo_content = memo_content + splits[last]
+        #NOTE: DO NOT unescape whatever is left, otherwise XML will not be processable
+
+        #Correct image file references and spaces
+        memo_content = re.sub('img src="/', 'img height="400 px" src="', memo_content)
+        memo_content = re.sub('&nbsp;','\\u00A0'.encode().decode('unicode-escape'), memo_content)
+
+        #Parse memo into json dictionary form and extract date into readable format
+
+        memo_content = xmltodict.parse(memo_content) #Parse xml into json dictionary form
+        html = str(memo_content['memo']['contents']['content']) #Extract inner html; if none, empty string
+
+        #Generate date/time from timestamp (use first 10 characters, as it is in ms), and title from <meta title>
+        metalist = memo_content['memo']['header']['meta']
+        date = ''   #in case these tags are not present (they should be)
+        title = ''
+        for k, meta in enumerate(metalist):
+            if '@createdTime' in meta:
+                date = datetime.fromtimestamp(int(meta['@createdTime'][:10])).strftime('%Y-%m-%d %H:%M:%S')
+            if '@title' in meta:
+                title = meta['@title']
+
+        #Generate filenames for memos
+        file_name = '{}.html'.format('Memo of ' + date) #Generate filename from date/time
+
+        #Add HTML header and footer
+        html = '<html>\n<head>\n</head>\n<body>\n    <p><b>Date: </b>' + date + '</p>\n    <p><b>Title: </b>' + title + '</p><br />\n    '+ html + '</body>\n</html>'
+
+        #Save memo as a *.html file
+        with open(os.path.join(RESULTS_PATH, file_name), 'w', encoding='utf-8') as file:
+            file.write(html)
+
+    except zipfile.BadZipFile:
+        continue
