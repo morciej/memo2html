@@ -1,5 +1,5 @@
 # memo2html
-A Python script to convert Samsung .memo (S-memeo) files to HTML, and import the associated media
+A Python script to convert Samsung .memo (S-memo) files to HTML, and import the associated media
 
 ## How to use
 1. Download the memo2html file, and set permission to run it as a program
